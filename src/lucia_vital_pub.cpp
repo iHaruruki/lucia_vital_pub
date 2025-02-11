@@ -75,88 +75,73 @@ private:
 		for(auto &cmd : request){
 			write(serial_fd, cmd.data(), cmd.size());
 			usleep(0.1*1000000);
-			//read_sensor_data();
+			read_sensor_data();
 		}
 	}
 
 	// 修正の必要あり
 	void read_sensor_data(){
-		while(rclcpp::ok()){
-			unsigned char rxData[BUFSIZE] = {};
-			int len = read(serial_fd, rxData, BUFSIZE);
-			RCLCPP_INFO(this->get_logger(), "Read %d bytes", len);
+        unsigned char rxData[BUFSIZE] = {};
+        int len = read(serial_fd, rxData, BUFSIZE);
+        RCLCPP_INFO(this->get_logger(), "Read %d bytes", len);
 
-			if(len < 0){
-				RCLCPP_ERROR(rclcpp::get_logger("sensor_reader"), "Serial read error");
-				continue;
-			}
-			if(len == 0){
-				//RCLCPP_WARN(rclcpp::get_logger("sensor_reader"), "No data received");
-				continue;
-			}
+        if(len <= 0){
+            RCLCPP_ERROR(this->get_logger(), "No data received");
+            return;
+        }
 
-			std::vector<int> vec = {};
-			for(int i = 0; i < len;){
-				// パケットの先頭(0xAA)を検出
-				if(rxData[i] == 0xAA){
-					vec.clear();
+        std::vector<int> vec(rxData, rxData + len);
+
+		for(int i = 0; i < len;){
+			// パケットの先頭(0xAA)を検出
+			if(rxData[i] == 0xAA){
+				vec.clear();
+				vec.push_back(rxData[i]);
+				i++;
+				// パケットの終端(0x55)を検出・格納
+				while(i < len && rxData[i] != 0x55){
 					vec.push_back(rxData[i]);
 					i++;
-					// パケットの終端(0x55)を検出・格納
-					while(i < len && rxData[i] != 0x55){
-						vec.push_back(rxData[i]);
-						i++;
-					}
-					// vec[]に格納
-					if(i < len){
-						vec.push_back(rxData[i]);
-					}
+				}
+				// vec[]に格納
+				if(i < len){
+					vec.push_back(rxData[i]);
 				}
 			}
-
-			if (vec.size() < 12) {
-				RCLCPP_WARN(rclcpp::get_logger("sensor_reader"), "Invalid packet received");
-				continue;
-			}
-
-			// 基盤IDのチェック
-			int board_id = vec[2];
-
-			if(board_id == 10 || board_id == 11 || board_id == 12){
-				double spo2 = (double)(vec[6] * 256 + vec[5]) * 0.1;
-				int pulse = vec[4];
-				int blood_pressure_max = vec[7];
-				int blood_pressure_min = vec[8];
-
-				if(vec[1] == 197){// vec[1] = 0xC5
-					auto message = std_msgs::msg::Int32MultiArray();
-					int spo2_int = static_cast<int>(spo2);
-					message.data = {pulse, spo2_int, blood_pressure_max, blood_pressure_min};
-					publisher_vital->publish(message);
-
-					RCLCPP_INFO(rclcpp::get_logger("sendor_reader"),
-								"Vital [ID: %d] Pulse: %d, spo2: %.lf, BloPre(max/min): %d/%d",
-								board_id, pulse, spo2, blood_pressure_max, blood_pressure_min);
-				}
-			}
-
-			else if(vec[1] == 200){	// vec[1] = 0xC8
-
-
-				auto message = std_msgs::msg::Int32MultiArray();
-				message.data = {vec[2], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9], vec[10], vec[11]};
-				publisher_pressure->publish(message);
-
-				RCLCPP_INFO(rclcpp::get_logger("sensor_reader"),
-            				"[Id=%d] %d, %d, %d, %d, %d, %d, %d, %d",
-            				vec[2], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9], vec[10], vec[11]);
-			}
-			else{
-				RCLCPP_WARN(rclcpp::get_logger("sensor_reader"),"Unknown board ID: %d", board_id);
-			}
-			//rclcpp::spin_some(Node);
 		}
-	}
+
+        if (vec.size() < 12) {
+            RCLCPP_WARN(this->get_logger(), "Invalid packet received");
+            return;
+        }
+
+        int board_id = vec[2];
+
+        if(board_id == 10 || board_id == 11 || board_id == 12){
+            double spo2 = (double)(vec[6] * 256 + vec[5]) * 0.1;
+            int pulse = vec[4];
+            int blood_pressure_max = vec[7];
+            int blood_pressure_min = vec[8];
+
+            if(vec[1] == 197){
+                auto message = std_msgs::msg::Int32MultiArray();
+                message.data = {pulse, static_cast<int>(spo2), blood_pressure_max, blood_pressure_min};
+                publisher_vital->publish(message);
+                RCLCPP_INFO(this->get_logger(), "Vital [ID: %d] Pulse: %d, spo2: %.lf, BP max/min: %d/%d",
+                            board_id, pulse, spo2, blood_pressure_max, blood_pressure_min);
+            }
+        }
+        else if(vec[1] == 200){
+            auto message = std_msgs::msg::Int32MultiArray();
+            message.data.assign(vec.begin() + 2, vec.end());
+            publisher_pressure->publish(message);
+            RCLCPP_INFO(this->get_logger(), "Pressure Data [ID=%d]: %d, %d, %d, %d, %d, %d, %d, %d",
+                        vec[2], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9], vec[10], vec[11]);
+        }
+        else{
+            RCLCPP_WARN(this->get_logger(), "Unknown board ID: %d", board_id);
+        }
+    }
 
 	rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_vital;
 	rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_pressure;
