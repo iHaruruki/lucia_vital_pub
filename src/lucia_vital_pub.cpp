@@ -36,6 +36,7 @@ int main(int argc, char *argv[]){
 
 	while(1){
 
+    /*バイタル測定*/
 		// バイタル値を要求(ID:0x0A)
 		txData[0] = 0xAA;
 		txData[1] = 0xC1;
@@ -65,6 +66,41 @@ int main(int argc, char *argv[]){
 		txData[5] = 0x55;
 		write(fd, txData, BUFSIZE);
 		usleep(0.1*1000000);
+
+
+    /*圧力測定*/
+        // 圧力値を要求(ID:0x0C)
+        txData[0] = 0xAA;
+        txData[1] = 0xC1;
+        txData[2] = 0x0C;
+        txData[3] = 0x00;
+        txData[4] = 0x21;
+        txData[5] = 0x55;
+
+        write(fd, txData, BUFSIZE);
+        usleep(0.1*1000000);
+
+        // 圧力値を要求(ID:0x0B)
+        txData[0] = 0xAA;
+        txData[1] = 0xC1;
+        txData[2] = 0x0B;
+        txData[3] = 0x00;
+        txData[4] = 0x21;
+        txData[5] = 0x55;
+
+        write(fd, txData, BUFSIZE);
+        usleep(0.1*1000000);
+
+        // 圧力値を要求(ID:0x0A)
+        txData[0] = 0xAA;
+        txData[1] = 0xC1;
+        txData[2] = 0x0A;
+        txData[3] = 0x00;
+        txData[4] = 0x21;
+        txData[5] = 0x55;
+
+        write(fd, txData, BUFSIZE);
+        usleep(0.1*1000000);
 
 	}
 	ioctl(fd, TCSETS, &oldtio);
