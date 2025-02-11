@@ -1,5 +1,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int32.hpp"
+#include "std_msgs/msg/int32_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -19,8 +20,8 @@
 class VitalPublisher : public rclcpp::Node{
 public:
 	VitalPublisher() : Node("vital_publisher"){
-		publisher_vital = this->create_publisher<std_msgs::msg::Int32>("vital_data", 10);
-		publisher_pressure = this->create_publisher<std_msgs::msg::Int32>("pressure_data", 10);
+		publisher_vital = this->create_publisher<std_msgs::msg::Int32MultiArray>("vital_data", 10);
+		publisher_pressure = this->create_publisher<std_msgs::msg::Int32MultiArray>("pressure_data", 10);
 
 		serial_fd = open_serial_port();
 
@@ -80,24 +81,85 @@ private:
 
 	// 修正の必要あり
 	void read_sensor_data(){
-		uint8_t rxData[BUFSIZE] = {};
-		int n = read(serial_fd, rxData, BUFSIZE);
-		if(n > 0){
-			int sensor_value = rxData[2];
-			auto message = std_msgs::msg::Int32();
-			message.data = sensor_value;
+		while(rclcpp::ok()){
+			unsigned char rxData[BUFSIZE] = {};
+			int len = read(serial_fd, rxData, BUFSIZE);
+			RCLCPP_INFO(this->get_logger(), "Read %d bytes", len);
 
-			if(rxData[3] == 0x0A){
-				publisher_vital->publish(message);
+			if(len < 0){
+				RCLCPP_ERROR(rclcpp::get_logger("sensor_reader"), "Serial read error");
+				continue;
 			}
-			else if(rxData[3] == 0x0B){
+			if(len == 0){
+				//RCLCPP_WARN(rclcpp::get_logger("sensor_reader"), "No data received");
+				continue;
+			}
+
+			std::vector<int> vec = {};
+			for(int i = 0; i < len;){
+				// パケットの先頭(0xAA)を検出
+				if(rxData[i] == 0xAA){
+					vec.clear();
+					vec.push_back(rxData[i]);
+					i++;
+					// パケットの終端(0x55)を検出・格納
+					while(i < len && rxData[i] != 0x55){
+						vec.push_back(rxData[i]);
+						i++;
+					}
+					// vec[]に格納
+					if(i < len){
+						vec.push_back(rxData[i]);
+					}
+				}
+			}
+
+			if (vec.size() < 12) {
+				RCLCPP_WARN(rclcpp::get_logger("sensor_reader"), "Invalid packet received");
+				continue;
+			}
+
+			// 基盤IDのチェック
+			int board_id = vec[2];
+
+			if(board_id == 10 || board_id == 11 || board_id == 12){
+				double spo2 = (double)(vec[6] * 256 + vec[5]) * 0.1;
+				int pulse = vec[4];
+				int blood_pressure_max = vec[7];
+				int blood_pressure_min = vec[8];
+
+				if(vec[1] == 197){// vec[1] = 0xC5
+					auto message = std_msgs::msg::Int32MultiArray();
+					int spo2_int = static_cast<int>(spo2);
+					message.data = {pulse, spo2_int, blood_pressure_max, blood_pressure_min};
+					publisher_vital->publish(message);
+
+					RCLCPP_INFO(rclcpp::get_logger("sendor_reader"),
+								"Vital [ID: %d] Pulse: %d, spo2: %.lf, BloPre(max/min): %d/%d",
+								board_id, pulse, spo2, blood_pressure_max, blood_pressure_min);
+				}
+			}
+
+			else if(vec[1] == 200){	// vec[1] = 0xC8
+
+
+				auto message = std_msgs::msg::Int32MultiArray();
+				message.data = {vec[2], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9], vec[10], vec[11]};
 				publisher_pressure->publish(message);
+
+				RCLCPP_INFO(rclcpp::get_logger("sensor_reader"),
+            				"[Id=%d] %d, %d, %d, %d, %d, %d, %d, %d",
+            				vec[2], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9], vec[10], vec[11]);
 			}
+			else{
+				RCLCPP_WARN(rclcpp::get_logger("sensor_reader"),"Unknown board ID: %d", board_id);
+			}
+			//rclcpp::spin_some(Node);
 		}
 	}
 
-	rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr publisher_vital;
-	rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr publisher_pressure;
+	rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_vital;
+	rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_pressure;
 	rclcpp::TimerBase::SharedPtr timer;
 	int serial_fd;
 };
