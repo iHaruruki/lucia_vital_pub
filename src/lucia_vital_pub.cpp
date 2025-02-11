@@ -14,73 +14,81 @@
 #include <iostream>
 
 #define SERIAL_PORT "/dev/ttyUSB0"
-#define BAUDRATE B2000000	// 2000000bps
+#define BAUDRATE B2000000 // 2000000bps
 #define BUFSIZE 16
 
 class VitalPublisher : public rclcpp::Node{
 public:
-	VitalPublisher() : Node("vital_publisher"){
-		publisher_vital = this->create_publisher<std_msgs::msg::Int32MultiArray>("vital_data", 10);
-		publisher_pressure = this->create_publisher<std_msgs::msg::Int32MultiArray>("pressure_data", 10);
+    VitalPublisher() : Node("vital_publisher"){
+        publisher_vital = this->create_publisher<std_msgs::msg::Int32MultiArray>("vital_data", 10);
+        publisher_pressure = this->create_publisher<std_msgs::msg::Int32MultiArray>("pressure_data", 10);
 
-		serial_fd = open_serial_port();
+        serial_fd = open_serial_port();
 
-		timer = this->create_wall_timer(
-			std::chrono::milliseconds(100),
-			std::bind(&VitalPublisher::request_sensor_data, this));
-	}
+        timer = this->create_wall_timer(
+            std::chrono::milliseconds(100),
+            std::bind(&VitalPublisher::process_sensor_data, this));
+    }
 
-	~VitalPublisher(){
-		if(serial_fd >= 0){
-			close(serial_fd);
-		}
-	}
+    ~VitalPublisher(){
+        if(serial_fd >= 0){
+            close(serial_fd);
+        }
+    }
 
 private:
-	int open_serial_port(){
-		int fd = open(SERIAL_PORT, O_RDWR);
-		if(fd < 0){
-			RCLCPP_ERROR(this->get_logger(), "Failed to open serial port");
-			return -1;
-		}
+    int open_serial_port(){
+        int fd = open(SERIAL_PORT, O_RDWR | O_NOCTTY | O_SYNC);
+        if(fd < 0){
+            RCLCPP_ERROR(this->get_logger(), "Failed to open serial port");
+            return -1;
+        }
 
-		struct termios tty;
-		if(tcgetattr(fd, &tty) != 0){
-			RCLCPP_ERROR(this->get_logger(), "Error from tcgetattr");
-			return -1;
-		}
+        struct termios tty;
+        if(tcgetattr(fd, &tty) != 0){
+            RCLCPP_ERROR(this->get_logger(), "Error from tcgetattr");
+            close(fd);
+            return -1;
+        }
 
-		cfsetospeed(&tty, BAUDRATE);
-		cfsetispeed(&tty, BAUDRATE);
-		tty.c_cflag = BAUDRATE | CS8 | CREAD;	//tty.c_cflag = BAUDRATE | CS8 | CREAD | CLOCAL;
-		tcsetattr(fd, TCSANOW, &tty);
+        cfsetospeed(&tty, BAUDRATE);
+        cfsetispeed(&tty, BAUDRATE);
+        cfmakeraw(&tty); // RAWモードに設定
+        tty.c_cflag |= (CLOCAL | CREAD);
 
-		return fd;
-	}
+        if(tcsetattr(fd, TCSANOW, &tty) != 0){
+            RCLCPP_ERROR(this->get_logger(), "Error from tcsetattr");
+            close(fd);
+            return -1;
+        }
 
-	void request_sensor_data(){
-		if(serial_fd < 0) return;
+        return fd;
+    }
 
-		std::vector<std::vector<uint8_t>> request = {
-			/*バイタルセンサ値*/
-			{0xAA, 0xC1, 0x0A, 0x00, 0x20, 0x55},	//ID: 0x0A
-			{0xAA, 0xC1, 0x0B, 0x00, 0x20, 0x55},	//ID: 0x0B
-			{0xAA, 0xC1, 0x0C, 0x00, 0x20, 0x55},	//ID: 0x0C
-			/*圧力センサ値*/
-			{0xAA, 0xC1, 0x0C, 0x00, 0x21, 0x55},	//ID: 0x0C
-			{0xAA, 0xC1, 0x0B, 0x00, 0x21, 0x55},	//ID: 0x0B
-			{0xAA, 0xC1, 0x0A, 0x00, 0x21, 0x55},	//ID: 0x0A
-		};
+    void process_sensor_data(){
+        request_sensor_data();
+        read_sensor_data();
+    }
 
-		for(auto &cmd : request){
-			write(serial_fd, cmd.data(), cmd.size());
-			usleep(0.1*1000000);
-			read_sensor_data();
-		}
-	}
+    void request_sensor_data(){
+        if(serial_fd < 0) return;
 
-	// 修正の必要あり
-	void read_sensor_data(){
+        std::vector<std::vector<uint8_t>> request = {
+            {0xAA, 0xC1, 0x0A, 0x00, 0x20, 0x55},	//ID:0x0A
+            {0xAA, 0xC1, 0x0B, 0x00, 0x20, 0x55},	//ID:0x0B
+            {0xAA, 0xC1, 0x0C, 0x00, 0x20, 0x55},	//ID:0x0C
+            {0xAA, 0xC1, 0x0C, 0x00, 0x21, 0x55},	//ID:0x0C
+            {0xAA, 0xC1, 0x0B, 0x00, 0x21, 0x55},	//ID:0x0B
+            {0xAA, 0xC1, 0x0A, 0x00, 0x21, 0x55},	//ID:0x0A
+        };
+
+        for(auto &cmd : request){
+            write(serial_fd, cmd.data(), cmd.size());
+            usleep(100000);
+        }
+    }
+
+    void read_sensor_data(){
         unsigned char rxData[BUFSIZE] = {};
         int len = read(serial_fd, rxData, BUFSIZE);
         RCLCPP_INFO(this->get_logger(), "Read %d bytes", len);
@@ -90,25 +98,7 @@ private:
             return;
         }
 
-        std::vector<int> vec(rxData, rxData + len);
-
-		for(int i = 0; i < len;){
-			// パケットの先頭(0xAA)を検出
-			if(rxData[i] == 0xAA){
-				vec.clear();
-				vec.push_back(rxData[i]);
-				i++;
-				// パケットの終端(0x55)を検出・格納
-				while(i < len && rxData[i] != 0x55){
-					vec.push_back(rxData[i]);
-					i++;
-				}
-				// vec[]に格納
-				if(i < len){
-					vec.push_back(rxData[i]);
-				}
-			}
-		}
+        std::vector<int> vec(rxData, rxData + len);	//vec[]に代入
 
         if (vec.size() < 12) {
             RCLCPP_WARN(this->get_logger(), "Invalid packet received");
@@ -130,10 +120,11 @@ private:
                 RCLCPP_INFO(this->get_logger(), "Vital [ID: %d] Pulse: %d, spo2: %.lf, BP max/min: %d/%d",
                             board_id, pulse, spo2, blood_pressure_max, blood_pressure_min);
             }
+			// ここにelse if(vec[1] == 200){}を追加する
         }
         else if(vec[1] == 200){
             auto message = std_msgs::msg::Int32MultiArray();
-            message.data.assign(vec.begin() + 2, vec.end());
+            message.data.assign(vec.begin() + 2, vec.end());	//vecの3番目（index=2）から最後の要素 までを message.data にコピーする処理
             publisher_pressure->publish(message);
             RCLCPP_INFO(this->get_logger(), "Pressure Data [ID=%d]: %d, %d, %d, %d, %d, %d, %d, %d",
                         vec[2], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9], vec[10], vec[11]);
@@ -143,15 +134,15 @@ private:
         }
     }
 
-	rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_vital;
-	rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_pressure;
-	rclcpp::TimerBase::SharedPtr timer;
-	int serial_fd;
+    rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_vital;
+    rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_pressure;
+    rclcpp::TimerBase::SharedPtr timer;
+    int serial_fd;
 };
 
 int main(int argc, char *argv[]){
-	rclcpp::init(argc, argv);
-	rclcpp::spin(std::make_shared<VitalPublisher>());
-	rclcpp::shutdown();
-	return 0;
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<VitalPublisher>());
+    rclcpp::shutdown();
+    return 0;
 }
