@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <sys/wait.h>
 #include <iostream>
+#include <thread>
+#include <chrono>
 
 #define SERIAL_PORT "/dev/ttyUSB0"
 #define BAUDRATE B2000000 // 2000000bps
@@ -19,7 +21,7 @@
 
 class VitalPublisher : public rclcpp::Node{
 public:
-    VitalPublisher() : Node("vital_publisher"){
+    VitalPublisher() : Node("vital_publisher"), is_calibrating(false){
         publisher_vital = this->create_publisher<std_msgs::msg::Int32MultiArray>("vital_data", 10);
         publisher_pressure = this->create_publisher<std_msgs::msg::Int32MultiArray>("pressure_data", 10);
 
@@ -28,6 +30,8 @@ public:
         timer = this->create_wall_timer(
             std::chrono::milliseconds(100),
             std::bind(&VitalPublisher::process_sensor_data, this));
+
+        send_calibration_request();
     }
 
     ~VitalPublisher(){
@@ -65,7 +69,90 @@ private:
         return fd;
     }
 
+    void send_calibration_request(){
+        if(serial_fd < 0) return;
+
+        std::vector<uint8_t> cmd = {0xAA, 0xC1, 0x0A, 0x00, 0x23, 0x55};
+        write(serial_fd, cmd.data(), cmd.size());
+        RCLCPP_INFO(this->get_logger(), "Sent calibration request");
+        is_calibrating = true;
+    }
+
+    void check_calibration_status(){
+        unsigned char rxData[BUFSIZE] = {};
+        int len = read(serial_fd, rxData, BUFSIZE);
+        if(len <= 0) return;
+
+        std::vector<int> vec(rxData, rxData + len);
+        if(vec.size() < 6) return;
+
+        int error_code = vec[5];
+		switch (error_code){
+		case 0:
+			RCLCPP_ERROR(this->get_logger(), "[0x00]There is no data to reply");
+			is_calibrating = true;
+			break;
+		case 1:
+			RCLCPP_ERROR(this->get_logger(), "[0x01]Invalid Command");
+			is_calibrating = true;
+			break;
+		case 32:
+			RCLCPP_INFO(this->get_logger(), "[0x20]Calibrating vital sensors");
+			for(int count = 0; count < 600; count++){
+				if(count % 10 == 0){
+					RCLCPP_INFO(this->get_logger(), "Calibrating...");
+				}
+			}
+			is_calibrating = false;
+			break;
+		case 33:
+			RCLCPP_INFO(this->get_logger(), "[0x21]Vital sensor updating");
+			for(int count = 0; count < 600; count++){
+				if(count % 10 == 0){
+					RCLCPP_INFO(this->get_logger(), "Updating...");
+				}
+			}
+			is_calibrating = false;
+			break;
+		case 34:
+			RCLCPP_ERROR(this->get_logger(), "[0x22]Vital sensor update failed");
+			is_calibrating = true;
+			break;
+		case 35:
+			RCLCPP_ERROR(this->get_logger(), "[0x23]Vital sensor not connected");
+			is_calibrating = true;
+			break;
+		case 36:
+			RCLCPP_INFO(this->get_logger(), "[0x24]Resetting data");
+			for(int count = 0; count < 600; count++){
+				if(count % 10 == 0){
+					RCLCPP_INFO(this->get_logger(), "Resetting...");
+				}
+			}
+			is_calibrating = false;
+			break;
+		case 37:
+			RCLCPP_ERROR(this->get_logger(), "[0x25]No input signal");
+			is_calibrating = true;
+			break;
+		case 255:
+			RCLCPP_ERROR(this->get_logger(), "[0xFF]Unknown error");
+			is_calibrating = true;
+			break;
+
+		default:
+			break;
+		}
+		// std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+
+	// prosess_sensor_data()をループで回す
     void process_sensor_data(){
+        if(is_calibrating){
+            check_calibration_status();
+            return;
+        }
+		std::this_thread::sleep_for(std::chrono::seconds(10));	// 10秒待機
         request_sensor_data();
         read_sensor_data();
     }
@@ -74,12 +161,12 @@ private:
         if(serial_fd < 0) return;
 
         std::vector<std::vector<uint8_t>> request = {
-            {0xAA, 0xC1, 0x0A, 0x00, 0x20, 0x55},	//ID:0x0A
-            {0xAA, 0xC1, 0x0B, 0x00, 0x20, 0x55},	//ID:0x0B
-            {0xAA, 0xC1, 0x0C, 0x00, 0x20, 0x55},	//ID:0x0C
-            {0xAA, 0xC1, 0x0C, 0x00, 0x21, 0x55},	//ID:0x0C
-            {0xAA, 0xC1, 0x0B, 0x00, 0x21, 0x55},	//ID:0x0B
-            {0xAA, 0xC1, 0x0A, 0x00, 0x21, 0x55},	//ID:0x0A
+            {0xAA, 0xC1, 0x0A, 0x00, 0x20, 0x55},
+            {0xAA, 0xC1, 0x0B, 0x00, 0x20, 0x55},
+            {0xAA, 0xC1, 0x0C, 0x00, 0x20, 0x55},
+            {0xAA, 0xC1, 0x0C, 0x00, 0x21, 0x55},
+            {0xAA, 0xC1, 0x0B, 0x00, 0x21, 0x55},
+            {0xAA, 0xC1, 0x0A, 0x00, 0x21, 0x55},
         };
 
         for(auto &cmd : request){
@@ -91,19 +178,10 @@ private:
     void read_sensor_data(){
         unsigned char rxData[BUFSIZE] = {};
         int len = read(serial_fd, rxData, BUFSIZE);
-        RCLCPP_INFO(this->get_logger(), "Read %d bytes", len);
+        if(len <= 0) return;
 
-        if(len <= 0){
-            RCLCPP_ERROR(this->get_logger(), "No data received");
-            return;
-        }
-
-        std::vector<int> vec(rxData, rxData + len);	//vec[]に代入
-
-        if (vec.size() < 12) {
-            RCLCPP_WARN(this->get_logger(), "Invalid packet received");
-            return;
-        }
+        std::vector<int> vec(rxData, rxData + len);
+        if(vec.size() < 12) return;
 
         int board_id = vec[2];
 
@@ -117,20 +195,11 @@ private:
                 auto message = std_msgs::msg::Int32MultiArray();
                 message.data = {pulse, static_cast<int>(spo2), blood_pressure_max, blood_pressure_min};
                 publisher_vital->publish(message);
-                RCLCPP_INFO(this->get_logger(), "Vital [ID: %d] Pulse: %d, spo2: %.lf, BP max/min: %d/%d",
-                            board_id, pulse, spo2, blood_pressure_max, blood_pressure_min);
             }
-			// ここにelse if(vec[1] == 200){}を追加する
-        }
-        else if(vec[1] == 200){
+        } else if(vec[1] == 200){
             auto message = std_msgs::msg::Int32MultiArray();
-            message.data.assign(vec.begin() + 2, vec.end());	//vecの3番目（index=2）から最後の要素 までを message.data にコピーする処理
+            message.data.assign(vec.begin() + 2, vec.end());
             publisher_pressure->publish(message);
-            RCLCPP_INFO(this->get_logger(), "Pressure Data [ID=%d]: %d, %d, %d, %d, %d, %d, %d, %d",
-                        vec[2], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9], vec[10], vec[11]);
-        }
-        else{
-            RCLCPP_WARN(this->get_logger(), "Unknown board ID: %d", board_id);
         }
     }
 
@@ -138,6 +207,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_pressure;
     rclcpp::TimerBase::SharedPtr timer;
     int serial_fd;
+    bool is_calibrating;
 };
 
 int main(int argc, char *argv[]){
