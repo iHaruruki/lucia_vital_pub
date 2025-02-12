@@ -13,9 +13,10 @@
 #include <sys/wait.h>
 #include <iostream>
 
+using namespace std;
 #define SERIAL_PORT "/dev/ttyUSB0"
-#define BAUDRATE B2000000 // 2000000bps
-#define BUFSIZE 16
+#define BAUDRATE 2000000 // 2000000bps
+#define BUFSIZE 100
 
 class VitalPublisher : public rclcpp::Node{
 public:
@@ -23,7 +24,8 @@ public:
         publisher_vital = this->create_publisher<std_msgs::msg::Int32MultiArray>("vital_data", 10);
         publisher_pressure = this->create_publisher<std_msgs::msg::Int32MultiArray>("pressure_data", 10);
 
-        serial_fd = open_serial_port();
+        //serial_fd = open_serial_port();
+        fd = open(SERIAL_PORT, O_RDWR);
 
         timer = this->create_wall_timer(
             std::chrono::milliseconds(100),
@@ -31,14 +33,14 @@ public:
     }
 
     ~VitalPublisher(){
-        if(serial_fd >= 0){
-            close(serial_fd);
+        if(fd >= 0){
+            close(fd);
         }
     }
 
 private:
     int open_serial_port(){
-        int fd = open(SERIAL_PORT, O_RDWR | O_NOCTTY | O_SYNC);
+        //int fd = open(SERIAL_PORT, O_RDWR);
         if(fd < 0){
             RCLCPP_ERROR(this->get_logger(), "Failed to open serial port");
             return -1;
@@ -51,10 +53,16 @@ private:
             return -1;
         }
 
-        cfsetospeed(&tty, BAUDRATE);
-        cfsetispeed(&tty, BAUDRATE);
-        cfmakeraw(&tty); // RAWモードに設定
-        tty.c_cflag |= (CLOCAL | CREAD);
+        struct termios oldtio, newtio;
+
+        ioctl(fd, TCGETS, &oldtio);
+        newtio.c_cflag = BAUDRATE | CS8 | CREAD;
+        tcsetattr(fd, TCSANOW, &newtio);
+        ioctl(fd, TCGETS, &newtio);
+        //cfsetospeed(&tty, BAUDRATE);
+        //cfsetispeed(&tty, BAUDRATE);
+        //cfmakeraw(&tty); // RAWモードに設定
+        //tty.c_cflag |= (CLOCAL | CREAD);
 
         if(tcsetattr(fd, TCSANOW, &tty) != 0){
             RCLCPP_ERROR(this->get_logger(), "Error from tcsetattr");
@@ -71,7 +79,7 @@ private:
     }
 
     void request_sensor_data(){
-        if(serial_fd < 0) return;
+        if(fd < 0) return;
 
         std::vector<std::vector<uint8_t>> request = {
             {0xAA, 0xC1, 0x0A, 0x00, 0x20, 0x55},	//ID:0x0A
@@ -83,14 +91,14 @@ private:
         };
 
         for(auto &cmd : request){
-            write(serial_fd, cmd.data(), cmd.size());
+            write(fd, cmd.data(), cmd.size());
             usleep(100000);
         }
     }
 
     void read_sensor_data(){
         unsigned char rxData[BUFSIZE] = {};
-        int len = read(serial_fd, rxData, BUFSIZE);
+        int len = read(fd, rxData, BUFSIZE);
         RCLCPP_INFO(this->get_logger(), "Read %d bytes", len);
 
         if(len <= 0){
@@ -137,7 +145,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_vital;
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr publisher_pressure;
     rclcpp::TimerBase::SharedPtr timer;
-    int serial_fd;
+    //int serial_fd;
+    int fd;
 };
 
 int main(int argc, char *argv[]){
